@@ -1,3 +1,4 @@
+import os
 import argparse
 import random
 import math
@@ -30,9 +31,9 @@ def accumulate(model1, model2, decay=0.999):
         par1[k].data.mul_(decay).add_(1 - decay, par2[k].data)
 
 
-def sample_data(dataset, batch_size, image_size=4):
+def sample_data(dataset, batch_size, image_size=4, num_workers=1):
     dataset.resolution = image_size
-    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=1, drop_last=True)
+    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers, drop_last=True)
 
     return loader
 
@@ -43,18 +44,17 @@ def adjust_lr(optimizer, lr):
         group['lr'] = lr * mult
 
 
-def train(args, dataset, generator, discriminator):
+def train(args, dataset, generator, discriminator, g_optimizer, d_optimizer, g_running, code_size, n_critic, myargs):
     step = int(math.log2(args.init_size)) - 2
     resolution = 4 * 2 ** step
     loader = sample_data(
-        dataset, args.batch.get(resolution, args.batch_default), resolution
-    )
+        dataset, args.batch.get(resolution, args.batch_default), resolution, num_workers=args.num_workers)
     data_loader = iter(loader)
 
     adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
     adjust_lr(d_optimizer, args.lr.get(resolution, 0.001))
 
-    pbar = tqdm(range(3_000_000))
+    pbar = tqdm(range(3_000_000), file=myargs.stdout)
 
     requires_grad(generator, False)
     requires_grad(discriminator, True)
@@ -250,44 +250,10 @@ def train(args, dataset, generator, discriminator):
         pbar.set_description(state_msg)
 
 
-if __name__ == '__main__':
+def main(args, myargs):
     code_size = 512
     batch_size = 16
     n_critic = 1
-
-    parser = argparse.ArgumentParser(description='Progressive Growing of GANs')
-
-    parser.add_argument('path', type=str, help='path of specified dataset')
-    parser.add_argument(
-        '--phase',
-        type=int,
-        default=600_000,
-        help='number of samples used for each training phases',
-    )
-    parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
-    parser.add_argument('--sched', action='store_true', help='use lr scheduling')
-    parser.add_argument('--init_size', default=8, type=int, help='initial image size')
-    parser.add_argument('--max_size', default=1024, type=int, help='max image size')
-    parser.add_argument(
-        '--ckpt', default=None, type=str, help='load from previous checkpoints'
-    )
-    parser.add_argument(
-        '--no_from_rgb_activate',
-        action='store_true',
-        help='use activate in from_rgb (original implementation)',
-    )
-    parser.add_argument(
-        '--mixing', action='store_true', help='use mixing regularization'
-    )
-    parser.add_argument(
-        '--loss',
-        type=str,
-        default='wgan-gp',
-        choices=['wgan-gp', 'r1'],
-        help='class of gan loss',
-    )
-
-    args = parser.parse_args()
 
     generator = nn.DataParallel(StyledGenerator(code_size)).cuda()
     discriminator = nn.DataParallel(
@@ -341,4 +307,57 @@ if __name__ == '__main__':
 
     args.batch_default = 32
 
-    train(args, dataset, generator, discriminator)
+    train(args, dataset, generator, discriminator, g_optimizer=g_optimizer, d_optimizer=d_optimizer,
+          g_running=g_running, code_size=code_size, n_critic=n_critic, myargs=myargs)
+
+
+def run(argv_str=None):
+  from template_lib.utils.config import parse_args_and_setup_myargs, config2args
+  from template_lib.utils.modelarts_utils import prepare_dataset
+  run_script = os.path.relpath(__file__, os.getcwd())
+  args1, myargs, _ = parse_args_and_setup_myargs(argv_str, run_script=run_script, start_tb=False)
+  myargs.args = args1
+  myargs.config = getattr(myargs.config, args1.command)
+
+  if hasattr(myargs.config, 'datasets'):
+    prepare_dataset(myargs.config.datasets, cfg=myargs.config)
+
+  parser = argparse.ArgumentParser(description='Progressive Growing of GANs')
+
+  parser.add_argument('--path', type=str, help='path of specified dataset')
+  parser.add_argument(
+      '--phase',
+      type=int,
+      default=600_000,
+      help='number of samples used for each training phases',
+  )
+  parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
+  parser.add_argument('--sched', action='store_true', help='use lr scheduling')
+  parser.add_argument('--init_size', default=8, type=int, help='initial image size')
+  parser.add_argument('--max_size', default=1024, type=int, help='max image size')
+  parser.add_argument(
+      '--ckpt', default=None, type=str, help='load from previous checkpoints'
+  )
+  parser.add_argument(
+      '--no_from_rgb_activate',
+      action='store_true',
+      help='use activate in from_rgb (original implementation)',
+  )
+  parser.add_argument(
+      '--mixing', action='store_true', help='use mixing regularization'
+  )
+  parser.add_argument(
+      '--loss',
+      type=str,
+      default='wgan-gp',
+      choices=['wgan-gp', 'r1'],
+      help='class of gan loss',
+  )
+
+  args = parser.parse_args([])
+  args = config2args(myargs.config.args, args)
+
+  main(args, myargs)
+
+if __name__ == '__main__':
+  run()
